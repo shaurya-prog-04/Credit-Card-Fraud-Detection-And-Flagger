@@ -135,3 +135,62 @@ print("Missing values:", total_missing)
 print("Duplicate rows removed:", extra_duplicate_count, "(including", len(fraud_duplicates), "fraud cases)")
 print("Zero-amount transactions:", len(zero_amount_rows))
 print("Final clean dataset shape:", df_clean.shape)
+
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from imblearn.over_sampling import SMOTE
+
+df = pd.read_csv("creditcard_clean.csv")
+print("Loaded data. Shape:", df.shape)
+
+
+# SCALE THE AMT AND TIME
+
+scaler = StandardScaler()
+df["Amount_scaled"] = scaler.fit_transform(df[["Amount"]])
+df["Time_scaled"] = scaler.fit_transform(df[["Time"]])
+
+df = df.drop(columns=["Amount", "Time"])
+print("\nAmount and Time have been scaled.")
+print("New Amount_scaled range: min =", round(df["Amount_scaled"].min(), 2),
+      ", max =", round(df["Amount_scaled"].max(), 2))
+print("New Time_scaled range: min =", round(df["Time_scaled"].min(), 2),
+      ", max =", round(df["Time_scaled"].max(), 2))
+
+X = df.drop(columns=["Class"])
+y = df["Class"]
+
+print("\nFeatures (X) shape:", X.shape)
+print("Target (y) shape:", y.shape)
+
+# SPLIT INTO TTS (BEFORE SMOTE)
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y,
+    test_size=0.2,
+    stratify=y,
+    random_state=42
+)
+
+print("\nTraining set shape:", X_train.shape)
+print("Test set shape:", X_test.shape)
+
+print("\nFraud percentage in training set:", round((y_train.sum() / len(y_train)) * 100, 4), "%")
+print("Fraud percentage in test set:", round((y_test.sum() / len(y_test)) * 100, 4), "%")
+
+# APPLY SMOTE ON T
+
+print("\nBefore SMOTE")
+print(y_train.value_counts())
+
+smote = SMOTE(random_state=42)
+X_train_balanced, y_train_balanced = smote.fit_resample(X_train, y_train)
+
+print("\nAfter SMOTE")
+print(y_train_balanced.value_counts())
+
+X_train_balanced.to_csv("X_train_balanced.csv", index=False)
+y_train_balanced.to_csv("y_train_balanced.csv", index=False)
+X_test.to_csv("X_test.csv", index=False)
+y_test.to_csv("y_test.csv", index=False)
+
