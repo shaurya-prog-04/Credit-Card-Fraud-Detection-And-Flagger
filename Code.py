@@ -314,3 +314,206 @@ results_df.to_csv("model_results.csv", index=False)
 
 print("\n FULL MODEL COMPARISON TABLE ")
 print(results_df.to_string(index=False))
+
+# FAST FILTER + SECOND OPINION 
+print("=" * 60)
+print("ENSEMBLE - FAST FILTER + SECOND OPINION")
+print("=" * 60)
+
+X_train = pd.read_csv("X_train_balanced.csv")
+y_train = pd.read_csv("y_train_balanced.csv").squeeze()
+X_test = pd.read_csv("X_test.csv")
+y_test = pd.read_csv("y_test.csv").squeeze()
+
+xgb_model = XGBClassifier(eval_metric="logloss", random_state=42)
+xgb_model.fit(X_train, y_train)
+print("XGBoost (fast filter) trained.")
+
+X_train_rf = X_train.sample(n=40000, random_state=42)
+y_train_rf = y_train.loc[X_train_rf.index]
+rf_model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+rf_model.fit(X_train_rf, y_train_rf)
+print("Random Forest (second opinion) trained.")
+
+xgb_probability = xgb_model.predict_proba(X_test)[:, 1]
+
+LOWER_THRESHOLD = 0.10
+UPPER_THRESHOLD = 0.90
+is_confident_normal = xgb_probability < LOWER_THRESHOLD
+is_confident_fraud = xgb_probability > UPPER_THRESHOLD
+is_unsure = (~is_confident_normal) & (~is_confident_fraud)
+
+print("\nConfident NOT fraud:", is_confident_normal.sum())
+print("Confident IS fraud:", is_confident_fraud.sum())
+print("Unsure (sent to Random Forest):", is_unsure.sum())
+
+final_prediction_fastfilter = xgb_probability.copy()
+final_prediction_fastfilter[is_confident_normal] = 0
+final_prediction_fastfilter[is_confident_fraud] = 1
+if is_unsure.sum() > 0:
+    final_prediction_fastfilter[is_unsure] = rf_model.predict(X_test[is_unsure])
+final_prediction_fastfilter = final_prediction_fastfilter.astype(int)
+
+precision = precision_score(y_test, final_prediction_fastfilter)
+recall = recall_score(y_test, final_prediction_fastfilter)
+f1 = f1_score(y_test, final_prediction_fastfilter)
+cm = confusion_matrix(y_test, final_prediction_fastfilter)
+
+print(f"\nFast Filter Ensemble -> Precision: {precision:.4f} | Recall: {recall:.4f} | F1: {f1:.4f}")
+print("False Positives:", cm[0][1], "| False Negatives:", cm[1][0])
+
+fastfilter_result = {
+    "model": "Ensemble (Fast Filter + Second Opinion)",
+    "precision": precision, "recall": recall, "f1_score": f1,
+    "average_precision": None,
+    "false_positives": int(cm[0][1]), "false_negatives": int(cm[1][0]),
+}
+
+print("\n" + "=" * 60)
+print("ENSEMBLE - STACKING")
+print("=" * 60)
+
+# Build a fresh train,validation,test split
+df = pd.read_csv("creditcard_clean.csv")
+
+scaler = StandardScaler()
+df["Amount_scaled"] = scaler.fit_transform(df[["Amount"]])
+df["Time_scaled"] = scaler.fit_transform(df[["Time"]])
+df = df.drop(columns=["Amount", "Time"])
+
+X = df.drop(columns=["Class"])
+y = df["Class"]
+
+X_temp, X_test_stack, y_temp, y_test_stack = train_test_split(
+    X, y, test_size=0.20, stratify=y, random_state=42
+)
+X_train_stack, X_val_stack, y_train_stack, y_val_stack = train_test_split(
+    X_temp, y_temp, test_size=0.25, stratify=y_temp, random_state=42
+)
+
+print("Stacking train:", X_train_stack.shape, "| val:", X_val_stack.shape, "| test:", X_test_stack.shape)
+
+smote = SMOTE(random_state=42)
+X_train_stack_bal, y_train_stack_bal = smote.fit_resample(X_train_stack, y_train_stack)
+
+xgb_stack = XGBClassifier(eval_metric="logloss", random_state=42)
+xgb_stack.fit(X_train_stack_bal, y_train_stack_bal)
+
+X_train_rf_stack = X_train_stack_bal.sample(n=40000, random_state=42)
+y_train_rf_stack = y_train_stack_bal.loc[X_train_rf_stack.index]
+rf_stack = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+rf_stack.fit(X_train_rf_stack, y_train_rf_stack)
+
+print("Base models for stacking trained.")
+
+xgb_val_prob = xgb_stack.predict_proba(X_val_stack)[:, 1]
+rf_val_prob = rf_stack.predict_proba(X_val_stack)[:, 1]
+meta_features_val = pd.DataFrame({"xgb_probability": xgb_val_prob, "rf_probability": rf_val_prob})
+
+meta_model = LogisticRegression(random_state=42)
+meta_model.fit(meta_features_val, y_val_stack)
+
+print("Meta-model trained.")
+print("Learned weight for XGBoost's opinion:", round(meta_model.coef_[0][0], 4))
+print("Learned weight for Random Forest's opinion:", round(meta_model.coef_[0][1], 4))
+
+xgb_test_prob = xgb_stack.predict_proba(X_test_stack)[:, 1]
+rf_test_prob = rf_stack.predict_proba(X_test_stack)[:, 1]
+meta_features_test = pd.DataFrame({"xgb_probability": xgb_test_prob, "rf_probability": rf_test_prob})
+
+final_prediction_stack = meta_model.predict(meta_features_test)
+
+precision = precision_score(y_test_stack, final_prediction_stack)
+recall = recall_score(y_test_stack, final_prediction_stack)
+f1 = f1_score(y_test_stack, final_prediction_stack)
+cm = confusion_matrix(y_test_stack, final_prediction_stack)
+
+print(f"\nStacking Ensemble -> Precision: {precision:.4f} | Recall: {recall:.4f} | F1: {f1:.4f}")
+print("False Positives:", cm[0][1], "| False Negatives:", cm[1][0])
+
+stacking_result = {
+    "model": "Ensemble (Stacking)",
+    "precision": precision, "recall": recall, "f1_score": f1,
+    "average_precision": None,
+    "false_positives": int(cm[0][1]), "false_negatives": int(cm[1][0]),
+}
+
+X_test_stack.to_csv("stack_X_test.csv", index=False)
+y_test_stack.to_csv("stack_y_test.csv", index=False)
+
+import joblib
+joblib.dump(xgb_stack, "model_xgb.joblib")
+joblib.dump(rf_stack, "model_rf.joblib")
+joblib.dump(meta_model, "model_meta.joblib")
+
+existing_results = pd.read_csv("model_results.csv")
+new_rows = pd.DataFrame([fastfilter_result, stacking_result])
+combined = pd.concat([existing_results, new_rows], ignore_index=True)
+combined.to_csv("model_results.csv", index=False)
+ 
+print("\n    UPDATED COMPARISON TABLE (ALL MODELS) ")
+print(combined.to_string(index=False))
+
+import shap
+
+xgb_model = joblib.load("model_xgb.joblib")
+X_test = pd.read_csv("stack_X_test.csv")
+y_test = pd.read_csv("stack_y_test.csv").squeeze()
+
+print("Test data shape:", X_test.shape)
+
+explainer = shap.TreeExplainer(xgb_model)
+
+predicted_probability = xgb_model.predict_proba(X_test)[:, 1]
+predicted_class = (predicted_probability >= 0.5).astype(int)
+
+flagged_indices = X_test[predicted_class == 1].index
+print("\nNumber of transactions flagged by XGBoost:", len(flagged_indices))
+
+NUMBER_OF_EXAMPLES = 4
+example_ids = flagged_indices[:NUMBER_OF_EXAMPLES]
+
+for row_id in example_ids:
+    row = X_test.loc[[row_id]]
+    shap_values = explainer.shap_values(row)
+
+    contributions = pd.Series(
+        shap_values[0], index=X_test.columns
+    ).sort_values(key=abs, ascending=False)
+
+    top_5 = contributions.head(5)
+
+    print(f"\n--- Transaction (row {row_id}) ---")
+    print("Fraud probability:", round(predicted_probability[row_id], 4))
+    print("Actual label:", "Fraud" if y_test.loc[row_id] == 1 else "Normal")
+    print("Top 5 features driving this decision:")
+    print(top_5)
+
+    plt.figure(figsize=(7, 4))
+    colors = ["#d62728" if v > 0 else "#1f77b4" for v in top_5.values]
+    plt.barh(top_5.index[::-1], top_5.values[::-1], color=colors[::-1])
+    plt.xlabel("Contribution to fraud score (SHAP value)")
+    plt.title(f"Why transaction {row_id} was flagged")
+    plt.tight_layout()
+    plt.savefig(f"shap_explanation_row_{row_id}.png")
+    plt.close()
+
+    
+sample_for_summary = X_test.sample(n=min(500, len(X_test)), random_state=42)
+shap_values_summary = explainer.shap_values(sample_for_summary)
+
+mean_abs_shap = pd.Series(
+    abs(shap_values_summary).mean(axis=0), index=X_test.columns
+).sort_values(ascending=False)
+
+print("\nTop 10 most important features overall:")
+print(mean_abs_shap.head(10))
+
+plt.figure(figsize=(8, 6))
+mean_abs_shap.head(10)[::-1].plot(kind="barh")
+plt.xlabel("Average impact on fraud score (mean |SHAP value|)")
+plt.title("Overall Feature Importance (SHAP)")
+plt.tight_layout()
+plt.savefig("shap_global_importance.png")
+plt.close()
+
