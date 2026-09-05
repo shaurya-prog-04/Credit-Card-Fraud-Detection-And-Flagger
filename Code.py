@@ -194,3 +194,123 @@ y_train_balanced.to_csv("y_train_balanced.csv", index=False)
 X_test.to_csv("X_test.csv", index=False)
 y_test.to_csv("y_test.csv", index=False)
 
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from xgboost import XGBClassifier
+from sklearn.metrics import (
+    precision_score,
+    recall_score,
+    f1_score,
+    confusion_matrix,
+    precision_recall_curve,
+    average_precision_score,
+    classification_report,
+)
+
+RESULTS = []  
+X_train = pd.read_csv("X_train_balanced.csv")
+y_train = pd.read_csv("y_train_balanced.csv").squeeze()  
+X_test = pd.read_csv("X_test.csv")
+y_test = pd.read_csv("y_test.csv").squeeze()
+
+print("Training data shape:", X_train.shape)
+print("Test data shape:", X_test.shape)
+
+def evaluate_model(model_name, model, X_test, y_test, save_pr_curve_as=None):
+    y_pred = model.predict(X_test)
+    y_pred_probability = model.predict_proba(X_test)[:, 1]
+
+    precision = precision_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+    avg_precision = average_precision_score(y_test, y_pred_probability)
+
+    cm = confusion_matrix(y_test, y_pred)
+    true_negative = cm[0][0]
+    false_positive = cm[0][1]
+    false_negative = cm[1][0]
+    true_positive = cm[1][1]
+
+    print("Precision:", round(precision, 4))
+    print("Recall:", round(recall, 4))
+    print("F1 Score:", round(f1, 4))
+    print("Average Precision (area under PR curve):", round(avg_precision, 4))
+    print("\nConfusion Matrix:")
+    print(cm)
+    print("True Negatives  (correctly said 'not fraud'):", true_negative)
+    print("False Positives (innocent customer wrongly flagged):", false_positive)
+    print("False Negatives (missed real fraud):", false_negative)
+    print("True Positives  (correctly caught fraud):", true_positive)
+
+    if save_pr_curve_as:
+        precisions, recalls, _ = precision_recall_curve(y_test, y_pred_probability)
+        plt.figure(figsize=(7, 5))
+        plt.plot(recalls, precisions, label=f"{model_name} (AP = {avg_precision:.3f})")
+        plt.xlabel("Recall (how much fraud we catch)")
+        plt.ylabel("Precision (how many flags are real fraud)")
+        plt.title(f"Precision-Recall Curve — {model_name}")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.savefig(save_pr_curve_as, bbox_inches="tight")
+        plt.close()
+
+    result = {
+        "model": model_name,
+        "precision": precision,
+        "recall": recall,
+        "f1_score": f1,
+        "average_precision": avg_precision,
+        "false_positives": int(false_positive),
+        "false_negatives": int(false_negative),
+    }
+    return result, y_pred_probability
+
+
+log_reg_model = LogisticRegression(max_iter=1000, random_state=42)
+log_reg_model.fit(X_train, y_train)
+print("Model training complete.")
+
+log_reg_result, log_reg_probability = evaluate_model(
+    "Logistic Regression (baseline)", log_reg_model, X_test, y_test,
+    save_pr_curve_as="baseline_precision_recall_curve.png"
+)
+RESULTS.append(log_reg_result)
+
+print("\nFull classification report (baseline):")
+print(classification_report(y_test, log_reg_model.predict(X_test), target_names=["Normal", "Fraud"]))
+
+
+X_train_rf = X_train.sample(n=40000, random_state=42)
+y_train_rf = y_train.loc[X_train_rf.index]
+
+rf_model = RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1)
+rf_model.fit(X_train_rf, y_train_rf)
+
+rf_result, rf_probability = evaluate_model("Random Forest", rf_model, X_test, y_test)
+RESULTS.append(rf_result)
+
+xgb_model = XGBClassifier(eval_metric="logloss", random_state=42)
+xgb_model.fit(X_train, y_train)
+
+xgb_result, xgb_probability = evaluate_model("XGBoost", xgb_model, X_test, y_test)
+RESULTS.append(xgb_result)
+
+rf_precisions, rf_recalls, _ = precision_recall_curve(y_test, rf_probability)
+xgb_precisions, xgb_recalls, _ = precision_recall_curve(y_test, xgb_probability)
+
+plt.figure(figsize=(7, 5))
+plt.plot(rf_recalls, rf_precisions, label=f"Random Forest (AP = {rf_result['average_precision']:.3f})")
+plt.plot(xgb_recalls, xgb_precisions, label=f"XGBoost (AP = {xgb_result['average_precision']:.3f})")
+plt.xlabel("Recall (how much fraud we catch)")
+plt.ylabel("Precision (how many flags are real fraud)")
+plt.title("Precision-Recall Curve — Random Forest vs XGBoost")
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.savefig("rf_xgb_precision_recall_curve.png", bbox_inches="tight")
+plt.close()
+
+results_df = pd.DataFrame(RESULTS)
+results_df.to_csv("model_results.csv", index=False)
+
+print("\n FULL MODEL COMPARISON TABLE ")
+print(results_df.to_string(index=False))
